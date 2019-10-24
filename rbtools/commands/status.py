@@ -14,6 +14,19 @@ from rbtools.utils.repository import get_repository_id
 from rbtools.utils.users import get_username
 
 
+DRAFT_STATE = 'Draft'
+OPEN_ISSUES_STATE = 'Open Issues'
+PENDING_STATE = 'Pending'
+SHIPIT_STATE = 'Ship It!'
+
+STATUSES = (
+    DRAFT_STATE,
+    OPEN_ISSUES_STATE,
+    PENDING_STATE,
+    SHIPIT_STATE,
+)
+
+
 class Status(Command):
     """Display review requests for the current repository."""
 
@@ -46,6 +59,13 @@ class Status(Command):
                default=False,
                help='Shows review requests for all repositories instead '
                     'of just the detected repository.'),
+        Option('--status-filter',
+               dest='status_filter',
+               default=[],
+               choices=STATUSES,
+               action='append',
+               help='Status(es) to filter when listing review states. '
+                    'Defaults to all statuses.'),
         Command.server_options,
         Command.repository_options,
         Command.perforce_options,
@@ -108,27 +128,50 @@ class Status(Command):
 
         print()
 
-    def get_data(self, requests):
+    def get_data(self, requests, status_filter=None):
         """Return current status and review summary for all reviews.
 
         Args:
             requests (ListResource):
                 A ListResource that contains data on all open/draft requests.
+            status_filter (list of str):
+                Statuses to filter on. See also: `STATUSES`.
 
         Returns:
             list: A list whose elements are dicts of each request's statistics.
         """
         requests_stats = []
+        status_filter = status_filter or STATUSES
 
         for request in requests.all_items:
-            if request.draft:
-                status = 'Draft'
-            elif request.issue_open_count:
-                status = 'Open Issues (%s)' % request.issue_open_count
-            elif request.ship_it_count:
-                status = 'Ship It! (%s)' % request.ship_it_count
+            status = ''
+            if request.issue_open_count or request.ship_it_count:
+                # Non-mutually exclusive states.
+                #
+                # - One can have ship-it's, as well as fix-it's in a single CR.
+                status_map = {
+                    OPEN_ISSUES_STATE: request.issue_open_count,
+                    SHIPIT_STATE: request.ship_it_count,
+                }
+
+                status = '; '.join(
+                    '%s (%s)' % (status_name, count)
+                    for status_name, count in status_map.items()
+                    if count and status_name in status_filter
+                )
             else:
-                status = 'Pending'
+                # Mutually exclusive states.
+
+                if request.draft:
+                    status = DRAFT_STATE
+                else:
+                    status = PENDING_STATE
+
+                if status not in status_filter:
+                    status = ''
+
+            if not status:  # Status was filtered out.
+                continue
 
             info = {
                 'id':  request.id,
@@ -159,6 +202,8 @@ class Status(Command):
         # Check if repository info on reviewboard server match local ones.
         repository_info = repository_info.find_server_repository_info(api_root)
 
+        status_filter = set(self.options.status_filter) or STATUSES
+
         query_args = {
             'from_user': username,
             'status': 'pending',
@@ -180,7 +225,8 @@ class Status(Command):
                                 'requests from all repositories.')
 
         review_requests = api_root.get_review_requests(**query_args)
-        review_request_info = self.get_data(review_requests)
+        review_request_info = self.get_data(
+            review_requests, status_filter=status_filter)
 
         if self.options.format:
             self.format_results(review_request_info)
